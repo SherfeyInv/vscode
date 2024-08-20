@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as assert from 'assert';
+import assert from 'assert';
 import { Event } from 'vs/base/common/event';
 import { DisposableStore } from 'vs/base/common/lifecycle';
 import { URI } from 'vs/base/common/uri';
@@ -66,7 +66,7 @@ suite('suggest, word distance', function () {
 			private _worker = new EditorSimpleWorker(new class extends mock<IEditorWorkerHost>() { }, null);
 
 			constructor() {
-				super(modelService, new class extends mock<ITextResourceConfigurationService>() { }, new NullLogService(), new TestLanguageConfigurationService(), new LanguageFeaturesService());
+				super(undefined, modelService, new class extends mock<ITextResourceConfigurationService>() { }, new NullLogService(), new TestLanguageConfigurationService(), new LanguageFeaturesService());
 				this._worker.acceptNewModel({
 					url: model.uri.toString(),
 					lines: model.getLinesContent(),

@@ -28,7 +28,7 @@ import { INotebookEditorOptions } from 'vs/workbench/contrib/notebook/browser/no
 import { NotebookDiffEditorInput } from 'vs/workbench/contrib/notebook/common/notebookDiffEditorInput';
 import { NotebookCellTextModel } from 'vs/workbench/contrib/notebook/common/model/notebookCellTextModel';
 import { NotebookTextModel } from 'vs/workbench/contrib/notebook/common/model/notebookTextModel';
-import { ACCESSIBLE_NOTEBOOK_DISPLAY_ORDER, CellUri, NotebookSetting, INotebookContributionData, INotebookExclusiveDocumentFilter, INotebookRendererInfo, INotebookTextModel, IOrderedMimeType, IOutputDto, MimeTypeDisplayOrder, NotebookData, NotebookEditorPriority, NotebookRendererMatch, NOTEBOOK_DISPLAY_ORDER, RENDERER_EQUIVALENT_EXTENSIONS, RENDERER_NOT_AVAILABLE, TransientOptions, NotebookExtensionDescription, INotebookStaticPreloadInfo } from 'vs/workbench/contrib/notebook/common/notebookCommon';
+import { ACCESSIBLE_NOTEBOOK_DISPLAY_ORDER, CellUri, NotebookSetting, INotebookContributionData, INotebookExclusiveDocumentFilter, INotebookRendererInfo, INotebookTextModel, IOrderedMimeType, IOutputDto, MimeTypeDisplayOrder, NotebookEditorPriority, NotebookRendererMatch, NOTEBOOK_DISPLAY_ORDER, RENDERER_EQUIVALENT_EXTENSIONS, RENDERER_NOT_AVAILABLE, NotebookExtensionDescription, INotebookStaticPreloadInfo } from 'vs/workbench/contrib/notebook/common/notebookCommon';
 import { NotebookEditorInput } from 'vs/workbench/contrib/notebook/common/notebookEditorInput';
 import { INotebookEditorModelResolverService } from 'vs/workbench/contrib/notebook/common/notebookEditorModelResolverService';
 import { NotebookOutputRendererInfo, NotebookStaticPreloadInfo as NotebookStaticPreloadInfo } from 'vs/workbench/contrib/notebook/common/notebookOutputRenderer';
@@ -42,6 +42,7 @@ import { IUriIdentityService } from 'vs/platform/uriIdentity/common/uriIdentity'
 import { INotebookDocument, INotebookDocumentService } from 'vs/workbench/services/notebook/common/notebookDocumentService';
 import { MergeEditorInput } from 'vs/workbench/contrib/mergeEditor/browser/mergeEditorInput';
 import type { EditorInputWithOptions, IResourceMergeEditorInput } from 'vs/workbench/common/editor';
+import { streamToBuffer, VSBuffer, VSBufferReadableStream } from 'vs/base/common/buffer';
 
 export class NotebookProviderInfoStore extends Disposable {
 
@@ -132,7 +133,6 @@ export class NotebookProviderInfoStore extends Disposable {
 					selectors: notebookContribution.selector || [],
 					priority: this._convertPriority(notebookContribution.priority),
 					providerDisplayName: extension.description.displayName ?? extension.description.identifier.value,
-					exclusive: false
 				}));
 			}
 		}
@@ -171,7 +171,7 @@ export class NotebookProviderInfoStore extends Disposable {
 				id: notebookProviderInfo.id,
 				label: notebookProviderInfo.displayName,
 				detail: notebookProviderInfo.providerDisplayName,
-				priority: notebookProviderInfo.exclusive ? RegisteredEditorPriority.exclusive : notebookProviderInfo.priority,
+				priority: notebookProviderInfo.priority,
 			};
 			const notebookEditorOptions = {
 				canHandleDiff: () => !!this._configurationService.getValue(NotebookSetting.textDiffEditorPreview) && !this._accessibilityService.isScreenReaderOptimized(),
@@ -197,7 +197,7 @@ export class NotebookProviderInfoStore extends Disposable {
 					cellOptions = (options as INotebookEditorOptions | undefined)?.cellOptions;
 				}
 
-				const notebookOptions = { ...options, cellOptions } as INotebookEditorOptions;
+				const notebookOptions: INotebookEditorOptions = { ...options, cellOptions, viewState: undefined };
 				const editor = NotebookEditorInput.getOrCreate(this._instantiationService, notebookUri, preferredResource, notebookProviderInfo.id);
 				return { editor, options: notebookOptions };
 			};
@@ -639,8 +639,7 @@ export class NotebookService extends Disposable implements INotebookService {
 			id: viewType,
 			displayName: data.displayName,
 			providerDisplayName: data.providerDisplayName,
-			exclusive: data.exclusive,
-			priority: RegisteredEditorPriority.default,
+			priority: data.priority || RegisteredEditorPriority.default,
 			selectors: []
 		});
 
@@ -697,6 +696,14 @@ export class NotebookService extends Disposable implements INotebookService {
 		return result;
 	}
 
+	tryGetDataProviderSync(viewType: string): SimpleNotebookProviderInfo | undefined {
+		const selected = this.notebookProviderInfoStore.get(viewType);
+		if (!selected) {
+			return undefined;
+		}
+		return this._notebookProviders.get(selected.id);
+	}
+
 
 	private _persistMementos(): void {
 		this._memento.saveMemento();
@@ -737,17 +744,28 @@ export class NotebookService extends Disposable implements INotebookService {
 
 	// --- notebook documents: create, destory, retrieve, enumerate
 
-	createNotebookTextModel(viewType: string, uri: URI, data: NotebookData, transientOptions: TransientOptions): NotebookTextModel {
+	async createNotebookTextModel(viewType: string, uri: URI, stream?: VSBufferReadableStream): Promise<NotebookTextModel> {
 		if (this._models.has(uri)) {
 			throw new Error(`notebook for ${uri} already exists`);
 		}
-		const notebookModel = this._instantiationService.createInstance(NotebookTextModel, viewType, uri, data.cells, data.metadata, transientOptions);
+
+		const info = await this.withNotebookDataProvider(viewType);
+		if (!(info instanceof SimpleNotebookProviderInfo)) {
+			throw new Error('CANNOT open file notebook with this provider');
+		}
+
+
+		const bytes = stream ? await streamToBuffer(stream) : VSBuffer.fromByteArray([]);
+		const data = await info.serializer.dataToNotebook(bytes);
+
+
+		const notebookModel = this._instantiationService.createInstance(NotebookTextModel, info.viewType, uri, data.cells, data.metadata, info.serializer.options);
 		const modelData = new ModelData(notebookModel, this._onWillDisposeDocument.bind(this));
 		this._models.set(uri, modelData);
 		this._notebookDocumentService.addNotebookDocument(modelData);
 		this._onWillAddNotebookDocument.fire(notebookModel);
 		this._onDidAddNotebookDocument.fire(notebookModel);
-		this._postDocumentOpenActivation(viewType);
+		this._postDocumentOpenActivation(info.viewType);
 		return notebookModel;
 	}
 
